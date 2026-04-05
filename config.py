@@ -4,18 +4,29 @@ Configuration file for micro-loan default risk prediction project.
 
 import os
 from pathlib import Path
+from datetime import datetime
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "home-credit-default-risk"
-OUTPUT_DIR = PROJECT_ROOT / "outputs"
-MODELS_DIR = OUTPUT_DIR / "models"
-LOGS_DIR = OUTPUT_DIR / "logs"
+
+# Generate timestamped run directory
+RUN_TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M%S")
+RUN_DIR = PROJECT_ROOT / "outputs" / f"run_{RUN_TIMESTAMP}"
+
+# Create run-specific directories
+OUTPUT_DIR = RUN_DIR
+MODELS_DIR = RUN_DIR / "models"
+LOGS_DIR = RUN_DIR / "logs"
+EVALUATION_DIR = RUN_DIR / "evaluation"
+HPO_REPORTS_DIR = RUN_DIR / "hpo_reports"
 
 # Create directories if they don't exist
-OUTPUT_DIR.mkdir(exist_ok=True)
-MODELS_DIR.mkdir(exist_ok=True)
-LOGS_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+EVALUATION_DIR.mkdir(parents=True, exist_ok=True)
+HPO_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Data configuration
 DATA_CONFIG = {
@@ -58,6 +69,13 @@ MODEL_CONFIG = {
     },
 }
 
+# Export new directory variables for easy access
+__all__ = [
+    'PROJECT_ROOT', 'DATA_DIR', 'OUTPUT_DIR', 'MODELS_DIR', 'LOGS_DIR',
+    'EVALUATION_DIR', 'HPO_REPORTS_DIR', 'RUN_TIMESTAMP', 'RUN_DIR',
+    'DATA_CONFIG', 'MODEL_CONFIG', 'FOCAL_LOSS_CONFIG', 'OPTUNA_CONFIG', 'TRAINING_CONFIG', 'EVALUATION_CONFIG'
+]
+
 # Focal Loss configuration
 FOCAL_LOSS_CONFIG = {
     "alpha": 0.25,  # Weight for positive class
@@ -67,7 +85,7 @@ FOCAL_LOSS_CONFIG = {
 # Optuna HPO configuration
 OPTUNA_CONFIG = {
     "name": "microloan_tabnet_hpo",
-    "n_trials": 30,
+    "n_trials": 12,
     "timeout": 3600,  # 1 hour timeout
     "n_jobs": 1,
     "sampler": "tpe",  # Tree-structured Parzen Estimator
@@ -78,10 +96,10 @@ OPTUNA_CONFIG = {
 
 # Training configuration
 TRAINING_CONFIG = {
-    "epochs": 100,
+    "epochs": 60,
     "batch_size": 256,
     "validation_split": 0.2,
-    "early_stopping_patience": 15,
+    "early_stopping_patience": 7,
     "early_stopping_metric": "val_roc_auc",
 }
 

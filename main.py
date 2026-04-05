@@ -17,7 +17,8 @@ from typing import Dict, Any
 
 # Import project modules
 from config import (
-    PROJECT_ROOT, DATA_DIR, OUTPUT_DIR, MODELS_DIR, LOGS_DIR,
+    PROJECT_ROOT, DATA_DIR, OUTPUT_DIR, MODELS_DIR, LOGS_DIR, EVALUATION_DIR, HPO_REPORTS_DIR,
+    RUN_TIMESTAMP, RUN_DIR,
     DATA_CONFIG, MODEL_CONFIG, FOCAL_LOSS_CONFIG, OPTUNA_CONFIG, TRAINING_CONFIG, EVALUATION_CONFIG
 )
 from src.utils import setup_logging, compute_class_weights
@@ -46,12 +47,15 @@ class MicroLoanPipeline:
             'output_dir': OUTPUT_DIR,
             'models_dir': MODELS_DIR,
             'logs_dir': LOGS_DIR,
+            'evaluation_dir': EVALUATION_DIR,
+            'hpo_reports_dir': HPO_REPORTS_DIR,
             'random_state': 42,
         }
         
         # Setup logging
         self.logger = setup_logging(self.config['logs_dir'])
-        logger.info("MicroLoan Pipeline initialized")
+        logger.info(f"MicroLoan Pipeline initialized. Run ID: {RUN_TIMESTAMP}")
+        logger.info(f"Output directory: {self.config['output_dir']}")
         
         # Placeholders for models and data
         self.rf_model = None
@@ -59,6 +63,7 @@ class MicroLoanPipeline:
         self.ensemble_model = None
         self.data = None
         self.evaluator = None
+        self.optimal_thresholds = {}
     
     def stage_1_preprocessing(self) -> Dict[str, Any]:
         """
@@ -106,7 +111,7 @@ class MicroLoanPipeline:
         
         # Evaluate
         logger.info("\nEvaluating Random Forest model...")
-        self.evaluator = MetricsEvaluator(self.config['output_dir'] / "evaluation")
+        self.evaluator = MetricsEvaluator(self.config['evaluation_dir'])
         
         y_pred_proba = self.rf_model.predict_proba(self.data['X_test'])[:, 1]
         y_pred = self.rf_model.predict(self.data['X_test'])
@@ -119,17 +124,17 @@ class MicroLoanPipeline:
         # Plot curves
         self.evaluator.plot_roc_curve(
             self.data['y_test'], y_pred_proba, "Random Forest",
-            save_path=str(self.config['output_dir'] / "evaluation" / "roc_rf.png")
+            save_path=str(self.config['evaluation_dir'] / "roc_rf.png")
         )
         
         self.evaluator.plot_precision_recall_curve(
             self.data['y_test'], y_pred_proba, "Random Forest",
-            save_path=str(self.config['output_dir'] / "evaluation" / "pr_rf.png")
+            save_path=str(self.config['evaluation_dir'] / "pr_rf.png")
         )
         
         self.evaluator.plot_confusion_matrix(
             self.data['y_test'], y_pred, "Random Forest",
-            save_path=str(self.config['output_dir'] / "evaluation" / "cm_rf.png")
+            save_path=str(self.config['evaluation_dir'] / "cm_rf.png")
         )
         
         # Save model
@@ -167,13 +172,12 @@ class MicroLoanPipeline:
             n_trials=OPTUNA_CONFIG['n_trials'],
             timeout=OPTUNA_CONFIG['timeout'],
             metric='roc_auc',
-            cv_folds=3,
             epochs=TRAINING_CONFIG['epochs'],
             early_stopping_patience=TRAINING_CONFIG['early_stopping_patience'],
         )
         
         # Save HPO report
-        hpo_report_df = optimizer.report(self.config['output_dir'] / "hpo_reports")
+        hpo_report_df = optimizer.report(self.config['hpo_reports_dir'])
         
         logger.info(f"\nTop 5 trials:")
         logger.info(hpo_report_df.head(5).to_string())
@@ -230,13 +234,13 @@ class MicroLoanPipeline:
     
     def stage_5_evaluation(self) -> pd.DataFrame:
         """
-        Stage 5: Comprehensive Evaluation
+        Stage 5: Comprehensive Evaluation with Optimal Threshold Application
         
         Returns:
             Evaluation results DataFrame
         """
         logger.info("\n" + "="*80)
-        logger.info("STAGE 5: COMPREHENSIVE EVALUATION")
+        logger.info("STAGE 5: COMPREHENSIVE EVALUATION WITH OPTIMAL THRESHOLDS")
         logger.info("="*80)
         
         if self.data is None or self.evaluator is None:
@@ -245,77 +249,227 @@ class MicroLoanPipeline:
         if self.tabnet_model is None:
             raise ValueError("Must train TabNet first!")
         
-        logger.info("\nEvaluating TabNet model...")
-        
-        # Evaluate TabNet
+        # Get predictions for all models
+        logger.info("\nGenerating predictions on test set...")
+        y_pred_proba_rf = self.rf_model.predict_proba(self.data['X_test'])[:, 1]
         y_pred_proba_tabnet = self.tabnet_model.predict_proba(self.data['X_test'])[:, 1]
-        y_pred_tabnet = self.tabnet_model.predict(self.data['X_test'])
         
-        tabnet_metrics = self.evaluator.compute_metrics(
-            self.data['y_test'], y_pred_proba_tabnet, y_pred_tabnet,
-            model_name="TabNet"
-        )
-        
-        # Plot curves
-        self.evaluator.plot_roc_curve(
-            self.data['y_test'], y_pred_proba_tabnet, "TabNet",
-            save_path=str(self.config['output_dir'] / "evaluation" / "roc_tabnet.png")
-        )
-        
-        self.evaluator.plot_precision_recall_curve(
-            self.data['y_test'], y_pred_proba_tabnet, "TabNet",
-            save_path=str(self.config['output_dir'] / "evaluation" / "pr_tabnet.png")
-        )
-        
-        self.evaluator.plot_confusion_matrix(
-            self.data['y_test'], y_pred_tabnet, "TabNet",
-            save_path=str(self.config['output_dir'] / "evaluation" / "cm_tabnet.png")
-        )
-        
-        # Find optimal threshold
-        logger.info("\nFinding optimal classification thresholds...")
-        threshold_f1, f1_value = self.evaluator.find_optimal_threshold(
-            self.data['y_test'], y_pred_proba_tabnet, metric='f1'
-        )
-        
-        # Create ensemble if both models trained
+        # Create ensemble
         logger.info("\nCreating ensemble model...")
         self.ensemble_model = EnsembleModel(
             self.rf_model, self.tabnet_model,
             rf_weight=0.3, tabnet_weight=0.7
         )
-        
         y_pred_proba_ensemble = self.ensemble_model.predict_proba(self.data['X_test'])
-        y_pred_ensemble = self.ensemble_model.predict(self.data['X_test'], threshold=0.5)
         
-        ensemble_metrics = self.evaluator.compute_metrics(
-            self.data['y_test'], y_pred_proba_ensemble, y_pred_ensemble,
-            model_name="Ensemble"
+        # Find optimal thresholds for each model
+        logger.info("\nFinding optimal classification thresholds...")
+        
+        self.optimal_thresholds['rf'] = self.evaluator.find_optimal_threshold(
+            self.data['y_test'], y_pred_proba_rf, metric='f1', n_thresholds=100
+        )[0]
+        logger.info(f"  Random Forest optimal threshold (F1): {self.optimal_thresholds['rf']:.4f}")
+        
+        self.optimal_thresholds['tabnet'] = self.evaluator.find_optimal_threshold(
+            self.data['y_test'], y_pred_proba_tabnet, metric='f1', n_thresholds=100
+        )[0]
+        logger.info(f"  TabNet optimal threshold (F1): {self.optimal_thresholds['tabnet']:.4f}")
+        
+        self.optimal_thresholds['ensemble'] = self.evaluator.find_optimal_threshold(
+            self.data['y_test'], y_pred_proba_ensemble, metric='f1', n_thresholds=100
+        )[0]
+        logger.info(f"  Ensemble optimal threshold (F1): {self.optimal_thresholds['ensemble']:.4f}")
+        
+        # Evaluate all models at both default (0.5) and optimal thresholds
+        logger.info("\nEvaluating models at default threshold (0.5)...")
+        
+        y_pred_rf_default = (y_pred_proba_rf >= 0.5).astype(int)
+        y_pred_tabnet_default = (y_pred_proba_tabnet >= 0.5).astype(int)
+        y_pred_ensemble_default = (y_pred_proba_ensemble >= 0.5).astype(int)
+        
+        metrics_rf_default = self.evaluator.compute_metrics(
+            self.data['y_test'], y_pred_proba_rf, y_pred_rf_default,
+            threshold=0.5, model_name="Random Forest (threshold=0.5)"
         )
         
-        # Plot ensemble curves
+        metrics_tabnet_default = self.evaluator.compute_metrics(
+            self.data['y_test'], y_pred_proba_tabnet, y_pred_tabnet_default,
+            threshold=0.5, model_name="TabNet (threshold=0.5)"
+        )
+        
+        metrics_ensemble_default = self.evaluator.compute_metrics(
+            self.data['y_test'], y_pred_proba_ensemble, y_pred_ensemble_default,
+            threshold=0.5, model_name="Ensemble (threshold=0.5)"
+        )
+        
+        # Evaluate with optimal thresholds
+        logger.info("\nEvaluating models at optimal thresholds...")
+        
+        y_pred_rf_optimal = (y_pred_proba_rf >= self.optimal_thresholds['rf']).astype(int)
+        y_pred_tabnet_optimal = (y_pred_proba_tabnet >= self.optimal_thresholds['tabnet']).astype(int)
+        y_pred_ensemble_optimal = (y_pred_proba_ensemble >= self.optimal_thresholds['ensemble']).astype(int)
+        
+        metrics_rf_optimal = self.evaluator.compute_metrics(
+            self.data['y_test'], y_pred_proba_rf, y_pred_rf_optimal,
+            threshold=self.optimal_thresholds['rf'], model_name=f"Random Forest (threshold={self.optimal_thresholds['rf']:.4f})"
+        )
+        
+        metrics_tabnet_optimal = self.evaluator.compute_metrics(
+            self.data['y_test'], y_pred_proba_tabnet, y_pred_tabnet_optimal,
+            threshold=self.optimal_thresholds['tabnet'], model_name=f"TabNet (threshold={self.optimal_thresholds['tabnet']:.4f})"
+        )
+        
+        metrics_ensemble_optimal = self.evaluator.compute_metrics(
+            self.data['y_test'], y_pred_proba_ensemble, y_pred_ensemble_optimal,
+            threshold=self.optimal_thresholds['ensemble'], model_name=f"Ensemble (threshold={self.optimal_thresholds['ensemble']:.4f})"
+        )
+        
+        # Plot evaluation curves for all models
+        logger.info("\nGenerating evaluation plots...")
+        
+        # RF plots
+        self.evaluator.plot_roc_curve(
+            self.data['y_test'], y_pred_proba_rf, "Random Forest",
+            save_path=str(self.config['evaluation_dir'] / "roc_rf.png")
+        )
+        self.evaluator.plot_precision_recall_curve(
+            self.data['y_test'], y_pred_proba_rf, "Random Forest",
+            save_path=str(self.config['evaluation_dir'] / "pr_rf.png")
+        )
+        self.evaluator.plot_confusion_matrix(
+            self.data['y_test'], y_pred_rf_optimal, "Random Forest (Optimal)",
+            save_path=str(self.config['evaluation_dir'] / "cm_rf_optimal.png")
+        )
+        
+        # TabNet plots
+        self.evaluator.plot_roc_curve(
+            self.data['y_test'], y_pred_proba_tabnet, "TabNet",
+            save_path=str(self.config['evaluation_dir'] / "roc_tabnet.png")
+        )
+        self.evaluator.plot_precision_recall_curve(
+            self.data['y_test'], y_pred_proba_tabnet, "TabNet",
+            save_path=str(self.config['evaluation_dir'] / "pr_tabnet.png")
+        )
+        self.evaluator.plot_confusion_matrix(
+            self.data['y_test'], y_pred_tabnet_optimal, "TabNet (Optimal)",
+            save_path=str(self.config['evaluation_dir'] / "cm_tabnet_optimal.png")
+        )
+        
+        # Ensemble plots
         self.evaluator.plot_roc_curve(
             self.data['y_test'], y_pred_proba_ensemble, "Ensemble",
-            save_path=str(self.config['output_dir'] / "evaluation" / "roc_ensemble.png")
+            save_path=str(self.config['evaluation_dir'] / "roc_ensemble.png")
+        )
+        self.evaluator.plot_precision_recall_curve(
+            self.data['y_test'], y_pred_proba_ensemble, "Ensemble",
+            save_path=str(self.config['evaluation_dir'] / "pr_ensemble.png")
+        )
+        self.evaluator.plot_confusion_matrix(
+            self.data['y_test'], y_pred_ensemble_optimal, "Ensemble (Optimal)",
+            save_path=str(self.config['evaluation_dir'] / "cm_ensemble_optimal.png")
         )
         
-        # Compile results
-        logger.info("\nFinal Model Comparison:")
-        results_df = pd.DataFrame([
-            {'Model': 'Random Forest', **self.evaluator.compute_metrics(
-                self.data['y_test'],
-                self.rf_model.predict_proba(self.data['X_test'])[:, 1],
-                self.rf_model.predict(self.data['X_test']),
-                model_name="RF"
-            )},
-            {'Model': 'TabNet', **tabnet_metrics},
-            {'Model': 'Ensemble', **ensemble_metrics},
-        ])
+        # Compile comparison results
+        logger.info("\n" + "="*80)
+        logger.info("THRESHOLD COMPARISON SUMMARY")
+        logger.info("="*80)
+        
+        comparison_results = []
+        
+        # Default threshold results
+        comparison_results.append({
+            'Model': 'Random Forest',
+            'Threshold': 0.5,
+            'Threshold_Type': 'Default',
+            'ROC_AUC': metrics_rf_default['ROC_AUC'],
+            'PR_AUC': metrics_rf_default['PR_AUC'],
+            'F1_Score': metrics_rf_default['F1_Score'],
+            'Precision': metrics_rf_default['Precision'],
+            'Recall': metrics_rf_default['Recall'],
+            'Accuracy': metrics_rf_default['Accuracy'],
+        })
+        
+        comparison_results.append({
+            'Model': 'TabNet',
+            'Threshold': 0.5,
+            'Threshold_Type': 'Default',
+            'ROC_AUC': metrics_tabnet_default['ROC_AUC'],
+            'PR_AUC': metrics_tabnet_default['PR_AUC'],
+            'F1_Score': metrics_tabnet_default['F1_Score'],
+            'Precision': metrics_tabnet_default['Precision'],
+            'Recall': metrics_tabnet_default['Recall'],
+            'Accuracy': metrics_tabnet_default['Accuracy'],
+        })
+        
+        comparison_results.append({
+            'Model': 'Ensemble',
+            'Threshold': 0.5,
+            'Threshold_Type': 'Default',
+            'ROC_AUC': metrics_ensemble_default['ROC_AUC'],
+            'PR_AUC': metrics_ensemble_default['PR_AUC'],
+            'F1_Score': metrics_ensemble_default['F1_Score'],
+            'Precision': metrics_ensemble_default['Precision'],
+            'Recall': metrics_ensemble_default['Recall'],
+            'Accuracy': metrics_ensemble_default['Accuracy'],
+        })
+        
+        # Optimal threshold results
+        comparison_results.append({
+            'Model': 'Random Forest',
+            'Threshold': round(self.optimal_thresholds['rf'], 4),
+            'Threshold_Type': 'Optimal (F1)',
+            'ROC_AUC': metrics_rf_optimal['ROC_AUC'],
+            'PR_AUC': metrics_rf_optimal['PR_AUC'],
+            'F1_Score': metrics_rf_optimal['F1_Score'],
+            'Precision': metrics_rf_optimal['Precision'],
+            'Recall': metrics_rf_optimal['Recall'],
+            'Accuracy': metrics_rf_optimal['Accuracy'],
+        })
+        
+        comparison_results.append({
+            'Model': 'TabNet',
+            'Threshold': round(self.optimal_thresholds['tabnet'], 4),
+            'Threshold_Type': 'Optimal (F1)',
+            'ROC_AUC': metrics_tabnet_optimal['ROC_AUC'],
+            'PR_AUC': metrics_tabnet_optimal['PR_AUC'],
+            'F1_Score': metrics_tabnet_optimal['F1_Score'],
+            'Precision': metrics_tabnet_optimal['Precision'],
+            'Recall': metrics_tabnet_optimal['Recall'],
+            'Accuracy': metrics_tabnet_optimal['Accuracy'],
+        })
+        
+        comparison_results.append({
+            'Model': 'Ensemble',
+            'Threshold': round(self.optimal_thresholds['ensemble'], 4),
+            'Threshold_Type': 'Optimal (F1)',
+            'ROC_AUC': metrics_ensemble_optimal['ROC_AUC'],
+            'PR_AUC': metrics_ensemble_optimal['PR_AUC'],
+            'F1_Score': metrics_ensemble_optimal['F1_Score'],
+            'Precision': metrics_ensemble_optimal['Precision'],
+            'Recall': metrics_ensemble_optimal['Recall'],
+            'Accuracy': metrics_ensemble_optimal['Accuracy'],
+        })
+        
+        results_df = pd.DataFrame(comparison_results)
+        
+        # Print summary table  
+        logger.info("\nDetailed Threshold Comparison:")
+        logger.info(results_df.to_string(index=False))
         
         # Save results
         results_path = self.config['output_dir'] / "model_comparison.csv"
         results_df.to_csv(results_path, index=False)
-        logger.info(f"Results saved to {results_path}")
+        logger.info(f"\nResults saved to {results_path}")
+        
+        # Save optimal thresholds metadata
+        thresholds_path = self.config['output_dir'] / "optimal_thresholds.txt"
+        with open(thresholds_path, 'w') as f:
+            f.write("Optimal Classification Thresholds (F1-based)\n")
+            f.write("="*40 + "\n")
+            f.write(f"Random Forest: {self.optimal_thresholds['rf']:.4f}\n")
+            f.write(f"TabNet:        {self.optimal_thresholds['tabnet']:.4f}\n")
+            f.write(f"Ensemble:      {self.optimal_thresholds['ensemble']:.4f}\n")
+        logger.info(f"Thresholds saved to {thresholds_path}")
         
         return results_df
     

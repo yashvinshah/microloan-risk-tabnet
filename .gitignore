@@ -48,9 +48,7 @@ home-credit-default-risk/*.csv
 *.csv
 
 # Outputs
-outputs/
-models/
-logs/
+
 
 # Optuna studies
 *.db

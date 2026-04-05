@@ -8,7 +8,6 @@ import pandas as pd
 import optuna
 from optuna.samplers import TPESampler
 from optuna.pruners import MedianPruner
-from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, f1_score, precision_recall_curve, auc
 from typing import Dict, Any, Tuple, Optional, Callable
 from pathlib import Path
@@ -82,7 +81,6 @@ class TabNetOptimizer:
         y_train: np.ndarray,
         X_val: np.ndarray,
         y_val: np.ndarray,
-        cv_folds: int = 3,
         metric: str = "roc_auc",
         **kwargs
     ) -> float:
@@ -95,7 +93,6 @@ class TabNetOptimizer:
             y_train: Training labels
             X_val: Validation features
             y_val: Validation labels
-            cv_folds: Number of cross-validation folds
             metric: Metric to optimize ('roc_auc', 'f1', 'pr_auc')
             **kwargs: Additional arguments
         
@@ -122,65 +119,52 @@ class TabNetOptimizer:
         logger.info(f"  TabNet: {params}")
         logger.info(f"  Focal Loss: {focal_params}")
         
-        # Cross-validation
-        skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
-        cv_scores = []
-        
-        for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train)):
-            X_fold_train = X_train[train_idx]
-            y_fold_train = y_train[train_idx]
-            X_fold_val = X_train[val_idx]
-            y_fold_val = y_train[val_idx]
+        try:
+            # Initialize and train model
+            model = TabNetModel(
+                n_features=self.n_features,
+                n_d=params['n_d'],
+                n_a=params['n_a'],
+                n_steps=params['n_steps'],
+                gamma=params['gamma'],
+                lambda_sparse=params['lambda_sparse'],
+            )
             
-            try:
-                # Initialize and train model
-                model = TabNetModel(
-                    n_features=self.n_features,
-                    n_d=params['n_d'],
-                    n_a=params['n_a'],
-                    n_steps=params['n_steps'],
-                    gamma=params['gamma'],
-                    lambda_sparse=params['lambda_sparse'],
-                )
-                
-                model.train(
-                    X_fold_train, y_fold_train,
-                    X_val=X_fold_val, y_val=y_fold_val,
-                    epochs=kwargs.get('epochs', 50),
-                    batch_size=params['batch_size'],
-                    early_stopping_patience=kwargs.get('early_stopping_patience', 10),
-                )
-                
-                # Evaluate
-                y_pred_proba = model.predict_proba(X_fold_val)[:, 1]
-                
-                if metric == 'roc_auc':
-                    score = roc_auc_score(y_fold_val, y_pred_proba)
-                elif metric == 'f1':
-                    y_pred = (y_pred_proba >= 0.5).astype(int)
-                    score = f1_score(y_fold_val, y_pred, zero_division=0)
-                elif metric == 'pr_auc':
-                    precision_vals, recall_vals, _ = precision_recall_curve(y_fold_val, y_pred_proba)
-                    score = auc(recall_vals, precision_vals)
-                else:
-                    raise ValueError(f"Unknown metric: {metric}")
-                
-                cv_scores.append(score)
-                logger.info(f"  Fold {fold}: {metric}={score:.4f}")
-                
-                # Prune if score is too low
-                trial.report(score, step=fold)
-                if trial.should_prune():
-                    logger.info(f"  Trial {trial.number} pruned")
-                    raise optuna.TrialPruned()
+            model.train(
+                X_train, y_train,
+                X_val=X_val, y_val=y_val,
+                epochs=kwargs.get('epochs', 50),
+                batch_size=params['batch_size'],
+                early_stopping_patience=kwargs.get('early_stopping_patience', 10),
+            )
             
-            except Exception as e:
-                logger.warning(f"Error in fold {fold}: {str(e)}")
-                return 0.0
+            # Evaluate on validation set
+            y_pred_proba = model.predict_proba(X_val)[:, 1]
+            
+            if metric == 'roc_auc':
+                score = roc_auc_score(y_val, y_pred_proba)
+            elif metric == 'f1':
+                y_pred = (y_pred_proba >= 0.5).astype(int)
+                score = f1_score(y_val, y_pred, zero_division=0)
+            elif metric == 'pr_auc':
+                precision_vals, recall_vals, _ = precision_recall_curve(y_val, y_pred_proba)
+                score = auc(recall_vals, precision_vals)
+            else:
+                raise ValueError(f"Unknown metric: {metric}")
+            
+            logger.info(f"Trial {trial.number} {metric}: {score:.4f}")
+            
+            # Report score for pruning
+            trial.report(score, step=0)
+            if trial.should_prune():
+                logger.info(f"  Trial {trial.number} pruned")
+                raise optuna.TrialPruned()
+            
+            return score
         
-        mean_score = np.mean(cv_scores)
-        logger.info(f"Trial {trial.number} mean {metric}: {mean_score:.4f}")
-        return mean_score
+        except Exception as e:
+            logger.warning(f"Error in trial {trial.number}: {str(e)}")
+            return 0.0
     
     def optimize(
         self,
@@ -191,7 +175,6 @@ class TabNetOptimizer:
         n_trials: int = 30,
         timeout: Optional[int] = None,
         metric: str = "roc_auc",
-        cv_folds: int = 3,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -205,7 +188,6 @@ class TabNetOptimizer:
             n_trials: Number of trials
             timeout: Timeout in seconds
             metric: Metric to optimize
-            cv_folds: Number of cross-validation folds
             **kwargs: Additional arguments
         
         Returns:
@@ -214,18 +196,19 @@ class TabNetOptimizer:
         logger.info(f"Starting optimization for {n_trials} trials...")
         logger.info(f"Optimization metric: {metric}")
         
-        # If no validation set provided, use stratified split
+        # If no validation set provided, use stratified split (80% train, 20% validation)
         if X_val is None or y_val is None:
             from sklearn.model_selection import train_test_split
             X_train, X_val, y_train, y_val = train_test_split(
                 X_train, y_train, test_size=0.2, stratify=y_train, random_state=42
             )
+            logger.info("Using 80/20 train/validation split for optimization")
         
         # Run optimization
         self.study.optimize(
             lambda trial: self.objective(
                 trial, X_train, y_train, X_val, y_val,
-                cv_folds=cv_folds, metric=metric, **kwargs
+                metric=metric, **kwargs
             ),
             n_trials=n_trials,
             timeout=timeout,

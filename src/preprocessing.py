@@ -148,12 +148,135 @@ class DataPreprocessor:
         
         return X_train_processed, X_test_processed
     
+    def engineer_bureau_features(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Engineer features from bureau.csv (previous credits aggregated by application ID).
+        
+        Args:
+            X: Application features DataFrame with SK_ID_CURR index
+        
+        Returns:
+            DataFrame with engineered bureau features merged to main dataset
+        """
+        logger.info("Engineering bureau features...")
+        
+        try:
+            bureau_df = load_data(self.data_dir, "bureau.csv")
+        except FileNotFoundError:
+            logger.warning("bureau.csv not found. Skipping bureau feature engineering.")
+            return X
+        
+        # Define aggregations with available columns
+        agg_dict = {}
+        
+        # Add aggregations for columns that exist
+        if 'SK_ID_BUREAU' in bureau_df.columns:
+            agg_dict['BUREAU_CREDIT_COUNT'] = ('SK_ID_BUREAU', 'count')
+        
+        if 'CREDIT_ACTIVE' in bureau_df.columns:
+            agg_dict['BUREAU_ACTIVE_COUNT'] = ('CREDIT_ACTIVE', lambda x: (x == 'Active').sum())
+            agg_dict['BUREAU_CLOSED_COUNT'] = ('CREDIT_ACTIVE', lambda x: (x == 'Closed').sum())
+        
+        if 'AMT_CREDIT_SUM' in bureau_df.columns:
+            agg_dict['BUREAU_CREDIT_SUM_MEAN'] = ('AMT_CREDIT_SUM', 'mean')
+            agg_dict['BUREAU_CREDIT_SUM_MAX'] = ('AMT_CREDIT_SUM', 'max')
+            agg_dict['BUREAU_CREDIT_SUM_MIN'] = ('AMT_CREDIT_SUM', 'min')
+        
+        if 'DAYS_CREDIT' in bureau_df.columns:
+            agg_dict['BUREAU_DAYS_CREDIT_MAX'] = ('DAYS_CREDIT', 'max')
+            agg_dict['BUREAU_DAYS_CREDIT_MIN'] = ('DAYS_CREDIT', 'min')
+        
+        if 'DAYS_CREDIT_UPDATE' in bureau_df.columns:
+            agg_dict['BUREAU_DAYS_CREDIT_UPDATE_MAX'] = ('DAYS_CREDIT_UPDATE', 'max')
+        
+        if 'AMT_CREDIT_SUM_DEBT' in bureau_df.columns:
+            agg_dict['BUREAU_DEBT_MAX'] = ('AMT_CREDIT_SUM_DEBT', 'max')
+            agg_dict['BUREAU_DEBT_MEAN'] = ('AMT_CREDIT_SUM_DEBT', 'mean')
+        
+        if 'AMT_CREDIT_MAX_OVERDUE' in bureau_df.columns:
+            agg_dict['BUREAU_OVERDUE_MAX'] = ('AMT_CREDIT_MAX_OVERDUE', 'max')
+            agg_dict['BUREAU_OVERDUE_MEAN'] = ('AMT_CREDIT_MAX_OVERDUE', 'mean')
+        
+        # Aggregate by SK_ID_CURR using named aggregation
+        bureau_agg = bureau_df.groupby('SK_ID_CURR').agg(**agg_dict).reset_index()
+        
+        # Merge with main dataset
+        X_bureau = X.reset_index().merge(bureau_agg, on='SK_ID_CURR', how='left')
+        X_bureau = X_bureau.set_index(X.index.name) if X.index.name else X_bureau
+        
+        logger.info(f"Added {len(bureau_agg.columns)-1} bureau features")
+        
+        return X_bureau
+    
+    def engineer_previous_application_features(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Engineer features from previous_application.csv (previous loan applications).
+        
+        Args:
+            X: Application features DataFrame with SK_ID_CURR index
+        
+        Returns:
+            DataFrame with engineered previous application features
+        """
+        logger.info("Engineering previous application features...")
+        
+        try:
+            prev_app_df = load_data(self.data_dir, "previous_application.csv")
+        except FileNotFoundError:
+            logger.warning("previous_application.csv not found. Skipping previous application feature engineering.")
+            return X
+        
+        # Define aggregations with available columns
+        agg_dict = {}
+        
+        # Add aggregations for columns that exist
+        if 'SK_ID_PREV' in prev_app_df.columns:
+            agg_dict['PREV_APP_COUNT'] = ('SK_ID_PREV', 'count')
+        
+        if 'NAME_CONTRACT_STATUS' in prev_app_df.columns:
+            agg_dict['PREV_APP_APPROVED_COUNT'] = ('NAME_CONTRACT_STATUS', lambda x: (x == 'Approved').sum())
+            agg_dict['PREV_APP_REFUSED_COUNT'] = ('NAME_CONTRACT_STATUS', lambda x: (x == 'Refused').sum())
+            agg_dict['PREV_APP_CANCELLED_COUNT'] = ('NAME_CONTRACT_STATUS', lambda x: (x == 'Cancelled').sum())
+        
+        if 'AMT_APPLICATION' in prev_app_df.columns:
+            agg_dict['PREV_AMT_APPLICATION_MEAN'] = ('AMT_APPLICATION', 'mean')
+            agg_dict['PREV_AMT_APPLICATION_MAX'] = ('AMT_APPLICATION', 'max')
+        
+        if 'AMT_CREDIT' in prev_app_df.columns:
+            agg_dict['PREV_AMT_CREDIT_MEAN'] = ('AMT_CREDIT', 'mean')
+            agg_dict['PREV_AMT_CREDIT_MAX'] = ('AMT_CREDIT', 'max')
+        
+        if 'RATE_INTEREST_PRIMARY' in prev_app_df.columns:
+            agg_dict['PREV_APP_INTEREST_RATE_MEAN'] = ('RATE_INTEREST_PRIMARY', 'mean')
+            agg_dict['PREV_APP_INTEREST_RATE_MAX'] = ('RATE_INTEREST_PRIMARY', 'max')
+        
+        if 'DAYS_DECISION' in prev_app_df.columns:
+            agg_dict['PREV_DAYS_DECISION_MIN'] = ('DAYS_DECISION', 'min')
+        
+        if 'DAYS_FIRST_DRAWING' in prev_app_df.columns:
+            agg_dict['PREV_DAYS_FIRST_DRAWING_MIN'] = ('DAYS_FIRST_DRAWING', 'min')
+        
+        # Aggregate by SK_ID_CURR
+        prev_agg = prev_app_df.groupby('SK_ID_CURR').agg(**agg_dict).reset_index()
+        
+        # Replace inf values with NaN
+        prev_agg = prev_agg.replace([np.inf, -np.inf], np.nan)
+        
+        # Merge with main dataset
+        X_prev = X.reset_index().merge(prev_agg, on='SK_ID_CURR', how='left')
+        X_prev = X_prev.set_index(X.index.name) if X.index.name else X_prev
+        
+        logger.info(f"Added {len(prev_agg.columns)-1} previous application features")
+        
+        return X_prev
+    
     def preprocess_pipeline(
         self,
         handle_missing: bool = True,
         encode_categorical: bool = True,
         scale: bool = True,
-        test_size: float = 0.2
+        test_size: float = 0.2,
+        engineer_features: bool = True
     ) -> Dict[str, Any]:
         """
         Complete preprocessing pipeline.
@@ -163,6 +286,7 @@ class DataPreprocessor:
             encode_categorical: Whether to encode categorical features
             scale: Whether to scale features
             test_size: Proportion for train-test split
+            engineer_features: Whether to engineer features from bureau and previous_application
         
         Returns:
             Dictionary containing processed data and metadata
@@ -171,6 +295,12 @@ class DataPreprocessor:
         
         # Load main data
         X, y = self.load_and_prepare_application_data()
+        
+        # Engineer additional features if requested
+        if engineer_features:
+            logger.info("\nEngineering external features...")
+            X = self.engineer_bureau_features(X)
+            X = self.engineer_previous_application_features(X)
         
         # Handle missing values
         if handle_missing:
