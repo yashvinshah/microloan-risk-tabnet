@@ -204,17 +204,23 @@ class TabNetOptimizer:
             )
             logger.info("Using 80/20 train/validation split for optimization")
         
-        # Run optimization
-        self.study.optimize(
-            lambda trial: self.objective(
-                trial, X_train, y_train, X_val, y_val,
-                metric=metric, **kwargs
-            ),
-            n_trials=n_trials,
-            timeout=timeout,
-            n_jobs=self.n_jobs,
-            show_progress_bar=True
-        )
+        # Run optimization and allow early stop via Ctrl+C
+        try:
+            self.study.optimize(
+                lambda trial: self.objective(
+                    trial, X_train, y_train, X_val, y_val,
+                    metric=metric, **kwargs
+                ),
+                n_trials=n_trials,
+                timeout=timeout,
+                n_jobs=self.n_jobs,
+                show_progress_bar=True
+            )
+        except KeyboardInterrupt:
+            logger.warning(
+                "Optimization was stopped early by KeyboardInterrupt. "
+                "Continuing with the best trial found so far."
+            )
         
         # Get best parameters
         best_trial = self.study.best_trial
