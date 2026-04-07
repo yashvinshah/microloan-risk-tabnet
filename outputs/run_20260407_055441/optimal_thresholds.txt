@@ -1,0 +1,5 @@
+Optimal Classification Thresholds (F1-based)
+========================================
+Random Forest: 0.5051
+TabNet:        0.1515
+Ensemble:      0.2525
