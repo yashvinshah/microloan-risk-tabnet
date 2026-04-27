@@ -219,20 +219,6 @@ The pipeline generates the following outputs:
 - `outputs/hpo_reports/optimization_report.csv` - Detailed HPO trial results
 - `outputs/logs/pipeline.log` - Complete execution log
 
-## Model Performance
-
-### Expected Results (Baseline)
-
-When trained on the Home Credit Default Risk dataset:
-
-| Model | ROC-AUC | PR-AUC | F1-Score |
-|-------|---------|--------|----------|
-| Random Forest | ~0.75 | ~0.45 | ~0.55 |
-| TabNet (optimized) | ~0.78 | ~0.50 | ~0.58 |
-| Ensemble | ~0.79 | ~0.52 | ~0.60 |
-
-*Results vary based on data preprocessing and HPO iterations*
-
 ## Key Techniques & Rationale
 
 ### 1. **Focal Loss for Class Imbalance**
@@ -318,9 +304,6 @@ results = optimizer.optimize(
     metric='roc_auc',
     cv_folds=5
 )
-
-# Generate report
-report_df = optimizer.report(output_dir="outputs/hpo_reports")
 ```
 
 ## Performance Optimization
@@ -363,32 +346,9 @@ TRAINING_CONFIG = {
 - Adjust Focal Loss parameters (alpha, gamma)
 - Try different ensemble weights
 
-## Citation
-
-If you use this project, please consider citing:
-
-```bibtex
-@software{microloan_tabnet_2024,
-  title={{Micro-Loan Default Risk Prediction using TabNet}},
-  author={Author Name},
-  year={2024},
-  url={https://github.com/your-repo}
-}
-```
-
 ## References
 
 - **TabNet**: Arik & Pfister (2021). "TabNet: Attentive Interpretable Tabular Learning"
 - **Focal Loss**: Lin et al. (2017). "Focal Loss for Dense Object Detection"
 - **Optuna**: Akiba et al. (2019). "Optuna: A Next-Generation Hyperparameter Optimization Framework"
 - **Home Credit Dataset**: https://www.kaggle.com/competitions/home-credit-default-risk
-
-## License
-
-This project is licensed under the MIT License - see LICENSE file for details.
-
----
-
-**Author**: Your Name  
-**Last Updated**: April 2024  
-**Status**: Production Ready ✓
